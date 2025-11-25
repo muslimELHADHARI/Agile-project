@@ -11,7 +11,6 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
 
 COPY requirements.txt .
 RUN pip wheel --no-cache-dir --no-deps --wheel-dir /app/wheels -r requirements.txt
-RUN find / -name "gunicorn"
 
 # Stage 2: Final image
 FROM python:3.11-slim-bookworm
@@ -20,8 +19,6 @@ WORKDIR /app
 
 # Copy only necessary files from build stage
 COPY --from=builder /app/wheels /wheels
-COPY --from=builder /usr/local/bin/gunicorn /usr/local/bin/gunicorn
-COPY --from=builder /usr/local/lib/python3.11/site-packages/gunicorn/ /usr/local/lib/python3.11/site-packages/gunicorn/
 
 # Install application dependencies
 RUN pip install --no-cache /wheels/*
