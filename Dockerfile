@@ -3,7 +3,8 @@ FROM python:3.9-slim-buster as builder
 WORKDIR /app
 
 # Install build dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update
+RUN DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     build-essential \
     gcc \
     && rm -rf /var/lib/apt/lists/*
