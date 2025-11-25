@@ -20,7 +20,7 @@ WORKDIR /app
 # Copy only necessary files from build stage
 COPY --from=builder /app/wheels /wheels
 COPY --from=builder /usr/local/bin/gunicorn /usr/local/bin/gunicorn
-COPY --from=builder /usr/local/lib/python3.9/site-packages/gunicorn/ /usr/local/lib/python3.9/site-packages/gunicorn/
+COPY --from=builder /usr/local/lib/python3.11/site-packages/gunicorn/ /usr/local/lib/python3.11/site-packages/gunicorn/
 
 # Install application dependencies
 RUN pip install --no-cache /wheels/*
