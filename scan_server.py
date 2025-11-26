@@ -642,6 +642,36 @@ async def health_check():
     Health check endpoint to verify the API is running.
     """
     return {"status": "healthy"}
+
+
+async def check_url(base: str, endpoint: str):
+    url = f"{base.rstrip('/')}/{endpoint.lstrip('/')}"
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.get(url, timeout=5) as response:
+                # Any HTTP response means endpoint exists
+                return {"url": url, "status": response.status}
+        except:
+            return None  # No response → does not exist
+
+@app.get("/gobuster/")
+async def gobuster(base: str):
+    # Read endpoints from resources folder
+    with open("resources/worldlist.txt", "r") as f:
+        endpoints = [line.strip() for line in f.readlines() if line.strip()]
+
+    tasks = [check_url(base, ep) for ep in endpoints]
+    responses = await asyncio.gather(*tasks)
+
+    # Filter only existing endpoints
+    existing = [r for r in responses if r]
+
+    if existing:
+        return {"found": existing}
+    else:
+        return None
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000) 
