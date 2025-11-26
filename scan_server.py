@@ -17,6 +17,7 @@ from enum import Enum
 import socket
 import json
 import concurrent.futures
+import requests
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -70,6 +71,7 @@ class Scan(BaseModel):
     openPorts: Optional[List[PortInfo]] = None
     vulnerabilities: Optional[List[Vulnerability]] = None
     rawOutput: Optional[str] = None
+    sqlmapResult: Optional[dict] = None
 
     def json(self, **kwargs):
         return json.dumps(self.dict(), **kwargs)
@@ -292,13 +294,71 @@ SERVICE_MAP = {
     28017: "mongodb-web",
     28080: "http-alt5"
 }
-
+SQLMAP_API_URL = "http://127.0.0.1:8775"
 
 class ScanManager:
     """
     Manages the scanning logic, including port scanning and vulnerability detection.
     This class provides static methods to perform different parts of the scanning process.
     """
+    #################my modification#################
+    @staticmethod
+    def _sqlmap_task(target:str) ->str:
+        #create a new sql map task
+        r=requests.get(f"{SQLMAP_API_URL}/task/new")
+        r.raise_for_status()
+        task_id=r.json()["taskid"]
+        return task_id
+    @staticmethod
+    def start_sqlmap_scan(task_id:str, target:str):
+        # start scan with basic options
+        data = {
+            "url": target,
+            "risk": 2,
+            "level": 2
+        }
+        r=requests.post(f"{SQLMAP_API_URL}/scan/{task_id}/start", json=data)
+        r.raise_for_status()
+    @staticmethod
+     def _get_sqlmap_status(task_id: str) -> str:
+        r = requests.get(f"{SQLMAP_API_URL}/scan/{task_id}/status")
+        r.raise_for_status()
+        return r.json().get("status")  # "running" or "terminated"
+    @staticmethod
+    def _get_sqlmap_data(task_id: str):
+        # this endpoint returns vulnerabilities and other data as JSON
+        r = requests.get(f"{SQLMAP_API_URL}/scan/{task_id}/data")
+        r.raise_for_status()
+        return r.json()
+    @staticmethod
+    def perform_sqlmap_scan(scan_id: str, target: str, scan_type: str):
+        try:
+            task_id = ScanManager._sqlmap_task(target)
+            ScanManager.start_sqlmap_scan(task_id, target)
+
+            # poll until sqlmap finishes
+            while True:
+                status = ScanManager._get_sqlmap_status(task_id)
+                if status == "terminated":
+                    break
+                #simple sleep to avoid hammering the api
+                asyncio.sleep(1)
+
+            data = ScanManager._get_sqlmap_data(task_id)
+
+            # update stored scan result
+            scan = scan_results[scan_id]
+            scan.status = ScanStatus.COMPLETED
+            scan.sqlmapResult = data  # already JSON-serializable
+            scan_results[scan_id] = scan
+
+        except Exception as e:
+            scan = scan_results.get(scan_id)
+            if scan:
+                scan.status = ScanStatus.FAILED
+                scan.rawOutput = str(e)
+                scan_results[scan_id] = scan
+    ######################### modification ends here in this class ####################
     @staticmethod
     def scan_port(target: str, port: int, timeout: float = 1.0) -> Optional[PortInfo]:
         """
@@ -585,3 +645,43 @@ async def health_check():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000) 
+
+
+########################this is my modification######################
+@app.post("/scan/sqlmap",response_model=Scan)
+async def create_sqlmap_scan(scan_request: ScanRequest,background_tasks: BackgroundTasks):
+    """
+    Initiate a new sqlmap scan in background and returns initial scan object
+    """
+    try:
+        # Generate scan id 
+        scan_id = str(uuid.uuid4())
+        # Create initial scan result 
+        scan = Scan(
+            id= scan_id,
+            target = scan_request.target,
+            scan_type= scan_request.scan_type,
+            timestamp = datetime.now().isoformat(),
+            status = ScanStatus.IN_PROGRESS,
+        )
+        # Store the scan
+        scan_results[scan_id] = scan
+        #start the scan in background 
+        background_tasks.add_task(
+            ScanManager.perform_sqlmap_scan,
+            scan_id,
+            scan_request.target,
+            scan_request.scan_type,
+        )
+        return scan
+    except Exception as e:
+        raise HTTPException(status_code=500,detail=str(e))
+@app.get("/scan/sqlmap/{scan_id}", response_model=Scan)
+async def get_sqlmap_scan(scan_id: str):
+    """
+    Returns the current state (status + JSON result) of a scan.
+    """
+    scan = scan_results.get(scan_id)
+    if not scan:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    return scan
