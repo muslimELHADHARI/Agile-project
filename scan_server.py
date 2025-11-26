@@ -670,13 +670,6 @@ async def gobuster(base: str):
         return {"found": existing}
     else:
         return None
-
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000) 
-
-
 ########################this is my modification######################
 @app.post("/scan/sqlmap",response_model=Scan)
 async def create_sqlmap_scan(scan_request: ScanRequest,background_tasks: BackgroundTasks):
@@ -715,3 +708,9 @@ async def get_sqlmap_scan(scan_id: str):
     if not scan:
         raise HTTPException(status_code=404, detail="Scan not found")
     return scan
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000) 
+
+
