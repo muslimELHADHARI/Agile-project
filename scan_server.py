@@ -23,10 +23,6 @@ import re
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 import random
 import string
-import urllib3
-
-# Disable SSL warnings for testing
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -820,83 +816,6 @@ class ScanManager:
                 scan.status = ScanStatus.FAILED
                 scan.rawOutput = str(e)
                 scan_results[scan_id] = scan
-    
-    @staticmethod
-    def perform_gobuster_scan(scan_id: str, target: str, scan_type: str):
-        """
-        Perform custom directory/file brute-forcing using our advanced detection algorithms
-        Replaces gobuster with pure logic-based directory enumeration
-        """
-        try:
-            logger.info(f"Starting directory bruteforce scan for {target} (scan_id: {scan_id})")
-            
-            # Update scan status
-            scan = scan_results.get(scan_id)
-            if not scan:
-                logger.error(f"Scan {scan_id} not found")
-                return
-            
-            # Convert scan_type to string if it's an enum
-            scan_type_str = scan_type.value if isinstance(scan_type, ScanType) else str(scan_type)
-            
-            # Perform the directory bruteforce scan
-            scan_result = DirectoryBruteForcer.perform_directory_bruteforce(
-                target,
-                wordlist=None,  # Will load from default location
-                extensions=None,  # Will use defaults based on scan_type
-                max_workers=50,
-                scan_type=scan_type_str
-            )
-            
-            # Format results similar to gobuster output structure
-            formatted_result = {
-                'status': 'completed',
-                'success': True,
-                'data': {
-                    'target': target,
-                    'found': scan_result.get('found_endpoints', []),
-                    'statistics': scan_result.get('statistics', {}),
-                    'total_tested': scan_result.get('total_tested', 0),
-                    'total_found': scan_result.get('total_found', 0),
-                    'scan_details': {
-                        'scan_type': scan_result.get('scan_type'),
-                        'timestamp': scan_result.get('scan_timestamp')
-                    }
-                }
-            }
-            
-            # Update scan result
-            scan.status = ScanStatus.COMPLETED
-            scan.sqlmapResult = formatted_result  # Reusing this field for gobuster results
-            
-            # Also add vulnerabilities/discoveries to the scan object
-            if scan_result.get('found_endpoints'):
-                discoveries = []
-                for endpoint in scan_result['found_endpoints']:
-                    severity = 'High' if endpoint['status'] == 200 else 'Medium'
-                    if endpoint['status'] in [401, 403]:
-                        severity = 'Medium'
-                    elif endpoint['status'] in [301, 302, 307]:
-                        severity = 'Low'
-                    
-                    discoveries.append(Vulnerability(
-                        name=f"Discovered Endpoint: {endpoint['endpoint']}",
-                        severity=severity,
-                        description=f"Found endpoint with status {endpoint['status']}. Size: {endpoint['size']} bytes. Content-Type: {endpoint.get('content_type', 'unknown')}",
-                        solution="Review discovered endpoints for sensitive information or misconfigurations."
-                    ))
-                scan.vulnerabilities = discoveries
-            
-            scan_results[scan_id] = scan
-            logger.info(f"Directory bruteforce scan completed for {target}")
-            
-        except Exception as e:
-            logger.error(f"Error during directory bruteforce scan: {str(e)}")
-            scan = scan_results.get(scan_id)
-            if scan:
-                scan.status = ScanStatus.FAILED
-                scan.rawOutput = str(e)
-                scan_results[scan_id] = scan
     @staticmethod
     def scan_port(target: str, port: int, timeout: float = 1.0) -> Optional[PortInfo]:
         """
@@ -1542,59 +1461,6 @@ class DirectoryBruteForcer:
             results['error'] = str(e)
         
         return results
-########################this is my modification######################
-@app.post("/scan/gobuster", response_model=Scan)
-async def create_gobuster_scan(scan_request: ScanRequest, background_tasks: BackgroundTasks):
-    """
-    Initiate a new directory/file brute-forcing scan using our custom engine.
-    The scan runs in background and returns initial scan object immediately.
-    Uses advanced algorithms: Status code analysis, Response size filtering, and Pattern matching.
-    """
-    try:
-        # Generate scan id 
-        scan_id = str(uuid.uuid4())
-        # Create initial scan result 
-        scan = Scan(
-            id=scan_id,
-            target=scan_request.target,
-            scanType=scan_request.scanType,
-            timestamp=datetime.now().isoformat(),
-            status=ScanStatus.IN_PROGRESS,
-        )
-        # Store the scan
-        scan_results[scan_id] = scan
-        # Start the scan in background 
-        background_tasks.add_task(
-            ScanManager.perform_gobuster_scan,
-            scan_id,
-            scan_request.target,
-            scan_request.scanType,
-        )
-        return scan
-    except Exception as e:
-        logger.error(f"Error creating directory bruteforce scan: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/scan/gobuster/{scan_id}", response_model=Scan)
-async def get_gobuster_scan(scan_id: str):
-    """
-    Returns the current state (status + JSON result) of a directory bruteforce scan.
-    """
-    scan = scan_results.get(scan_id)
-    if not scan:
-        raise HTTPException(status_code=404, detail="Scan not found")
-    return scan
-
-# Keep the old endpoint for backward compatibility
-@app.get("/gobuster/")
-async def gobuster_legacy(base: str):
-    """
-    Legacy endpoint - redirects to new scan-based approach
-    """
-    return {
-        "message": "This endpoint is deprecated. Use POST /scan/gobuster instead.",
-        "new_endpoint": "/scan/gobuster"
-    }
 ########################this is my modification######################
 @app.post("/scan/sqlmap", response_model=Scan)
 async def create_sqlmap_scan(scan_request: ScanRequest, background_tasks: BackgroundTasks):
