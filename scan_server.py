@@ -1542,7 +1542,7 @@ class DirectoryBruteForcer:
             results['error'] = str(e)
         
         return results
-
+########################this is my modification######################
 @app.post("/scan/gobuster", response_model=Scan)
 async def create_gobuster_scan(scan_request: ScanRequest, background_tasks: BackgroundTasks):
     """
