@@ -71,6 +71,10 @@ class ScanRequest(BaseModel):
     target: str
     scanType: ScanType
 
+class FullScanRequest(BaseModel):
+    target: str
+    scanType: ScanType
+
 class Scan(BaseModel):
     id: str
     target: str
@@ -85,8 +89,24 @@ class Scan(BaseModel):
     def json(self, **kwargs):
         return json.dumps(self.dict(), **kwargs)
 
+class FullScan(BaseModel):
+    id: str
+    target: str
+    scanType: ScanType
+    timestamp: str
+    status: ScanStatus
+    portScanId: str
+    sqlInjectionScanId: str
+    directoryScanId: str
+    portScan: Optional[Scan] = None
+    sqlInjectionScan: Optional[Scan] = None
+    directoryScan: Optional[Scan] = None
+
 # In-memory storage for scan results
 scan_results: Dict[str, Scan] = {}
+
+# In-memory storage for full scan results
+full_scan_results: Dict[str, FullScan] = {}
 
 # Common ports to scan
 COMMON_PORTS = [
@@ -1636,6 +1656,159 @@ async def get_sqlmap_scan(scan_id: str):
     if not scan:
         raise HTTPException(status_code=404, detail="Scan not found")
     return scan
+
+@app.post("/scan/full", response_model=FullScan)
+async def create_full_scan(scan_request: FullScanRequest, background_tasks: BackgroundTasks):
+    """
+    Initiate a comprehensive full scan that executes port scanning, SQL injection detection,
+    and directory enumeration simultaneously. All three scans run in parallel as background tasks.
+    
+    This endpoint provides a complete security assessment of the target by combining:
+    - Port scanning for open ports and services
+    - SQL injection vulnerability detection
+    - Directory and file enumeration
+    
+    Args:
+        scan_request: A FullScanRequest containing target URL and scan type
+        background_tasks: FastAPI BackgroundTasks for async execution
+        
+    Returns:
+        FullScan object with IDs for all three scan types
+        
+    Raises:
+        HTTPException: If an error occurs during scan initialization
+    """
+    try:
+        # Generate full scan ID
+        full_scan_id = str(uuid.uuid4())
+        
+        # Generate individual scan IDs
+        port_scan_id = str(uuid.uuid4())
+        sql_scan_id = str(uuid.uuid4())
+        dir_scan_id = str(uuid.uuid4())
+        
+        # Create initial scan objects for each scan type
+        port_scan = Scan(
+            id=port_scan_id,
+            target=scan_request.target,
+            scanType=scan_request.scanType,
+            timestamp=datetime.now().isoformat(),
+            status=ScanStatus.IN_PROGRESS
+        )
+        
+        sql_scan = Scan(
+            id=sql_scan_id,
+            target=scan_request.target,
+            scanType=scan_request.scanType,
+            timestamp=datetime.now().isoformat(),
+            status=ScanStatus.IN_PROGRESS
+        )
+        
+        dir_scan = Scan(
+            id=dir_scan_id,
+            target=scan_request.target,
+            scanType=scan_request.scanType,
+            timestamp=datetime.now().isoformat(),
+            status=ScanStatus.IN_PROGRESS
+        )
+        
+        # Store individual scans
+        scan_results[port_scan_id] = port_scan
+        scan_results[sql_scan_id] = sql_scan
+        scan_results[dir_scan_id] = dir_scan
+        
+        # Create full scan object
+        full_scan = FullScan(
+            id=full_scan_id,
+            target=scan_request.target,
+            scanType=scan_request.scanType,
+            timestamp=datetime.now().isoformat(),
+            status=ScanStatus.IN_PROGRESS,
+            portScanId=port_scan_id,
+            sqlInjectionScanId=sql_scan_id,
+            directoryScanId=dir_scan_id
+        )
+        
+        # Store full scan
+        full_scan_results[full_scan_id] = full_scan
+        
+        # Start all three scans in parallel as background tasks
+        background_tasks.add_task(
+            ScanManager.perform_scan,
+            port_scan_id,
+            scan_request.target,
+            scan_request.scanType,
+            background_tasks
+        )
+        
+        background_tasks.add_task(
+            ScanManager.perform_sqlmap_scan,
+            sql_scan_id,
+            scan_request.target,
+            scan_request.scanType
+        )
+        
+        background_tasks.add_task(
+            ScanManager.perform_gobuster_scan,
+            dir_scan_id,
+            scan_request.target,
+            scan_request.scanType
+        )
+        
+        logger.info(f"Full scan initiated: {full_scan_id} with port={port_scan_id}, sql={sql_scan_id}, dir={dir_scan_id}")
+        
+        return full_scan
+        
+    except Exception as e:
+        logger.error(f"Error creating full scan: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/scan/full/{scan_id}", response_model=FullScan)
+async def get_full_scan(scan_id: str):
+    """
+    Returns the current state of a full scan including all three sub-scans.
+    The response includes the status and results of port scanning, SQL injection detection,
+    and directory enumeration.
+    
+    Args:
+        scan_id: The unique identifier of the full scan
+        
+    Returns:
+        FullScan object with complete results from all three scan types
+        
+    Raises:
+        HTTPException: If the full scan ID is not found
+    """
+    full_scan = full_scan_results.get(scan_id)
+    if not full_scan:
+        raise HTTPException(status_code=404, detail="Full scan not found")
+    
+    # Update full scan with current sub-scan results
+    port_scan = scan_results.get(full_scan.portScanId)
+    sql_scan = scan_results.get(full_scan.sqlInjectionScanId)
+    dir_scan = scan_results.get(full_scan.directoryScanId)
+    
+    full_scan.portScan = port_scan
+    full_scan.sqlInjectionScan = sql_scan
+    full_scan.directoryScan = dir_scan
+    
+    # Update overall status based on sub-scans
+    statuses = []
+    if port_scan:
+        statuses.append(port_scan.status)
+    if sql_scan:
+        statuses.append(sql_scan.status)
+    if dir_scan:
+        statuses.append(dir_scan.status)
+    
+    if all(s == ScanStatus.COMPLETED for s in statuses):
+        full_scan.status = ScanStatus.COMPLETED
+    elif any(s == ScanStatus.FAILED for s in statuses):
+        full_scan.status = ScanStatus.FAILED
+    elif any(s == ScanStatus.IN_PROGRESS for s in statuses):
+        full_scan.status = ScanStatus.IN_PROGRESS
+    
+    return full_scan
 
 if __name__ == "__main__":
     import uvicorn
