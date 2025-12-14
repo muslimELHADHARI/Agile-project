@@ -24,6 +24,10 @@ from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 import random
 import string
 import urllib3
+import os
+from groq import Groq
+from fastapi import Body
+
 
 # Disable SSL warnings for testing
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -33,6 +37,11 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Vulnerability Scanner API",docs_url=None, redoc_url=None, openapi_url=None)
+
+
+#windows cmd commande to the api key to the local environment: "set GROQ_API_KEY="your_real_key_here"
+groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
+
 
 # Add CORS middleware
 app.add_middleware(
@@ -74,6 +83,14 @@ class ScanRequest(BaseModel):
 class FullScanRequest(BaseModel):
     target: str
     scanType: ScanType
+
+#for groq_api
+class AIRequest(BaseModel):
+    prompt: str
+
+class AIResponse(BaseModel):
+    answer: str
+
 
 class Scan(BaseModel):
     id: str
@@ -1200,6 +1217,32 @@ async def health_check():
     Health check endpoint to verify the API is running.
     """
     return {"status": "healthy"}
+
+
+# for groq_api
+@app.post("/ai_model", response_model=AIResponse)
+async def ai_model(request: AIRequest = Body(...)):
+    """
+    AI model endpoint that sends the prompt to the Groq LLM
+    and returns its answer.
+    """
+    if not groq_client.api_key:
+        raise HTTPException(status_code=500, detail="GROQ_API_KEY is not configured")
+
+    try:
+        completion = groq_client.chat.completions.create(
+            model="llama3-8b-8192",  # or another Groq model you want to use
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": request.prompt},
+            ],
+        )
+        answer = completion.choices[0].message.content
+        return AIResponse(answer=answer)
+    except Exception as e:
+        # Optional: log the error
+        logger.error(f"Error calling Groq API: {e}")
+        raise HTTPException(status_code=500, detail="Error calling Groq API")
 
 
 class DirectoryBruteForcer:
